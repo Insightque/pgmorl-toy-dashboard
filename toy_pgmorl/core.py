@@ -22,16 +22,16 @@ class ToyConfig:
     learning_rate: float = 0.035
     policy_std: float = 0.6
     batch_size: int = 128
-    weight_resolution: int = 8
+    weight_resolution: int = 20
     neighborhood_threshold: float = 0.1
     predictor_sigma: float = 0.03
     sparsity_coef: float = 0.18
     reward_offset: float = 50.0
-    objective_targets: tuple[float, ...] = (8.0, 2.0, 5.0)
-    objective_names: tuple[str, ...] = ("빠른 도착", "배터리 효율", "안전성")
+    objective_targets: tuple[float, ...] = (8.0, 2.0)
+    objective_names: tuple[str, ...] = ("빠른 도착", "에너지 효율")
     init_mu_low: float = 0.0
     init_mu_high: float = 10.0
-    gradient_mode: GradientMode = "reinforce"
+    gradient_mode: GradientMode = "analytic"
 
     @property
     def num_objectives(self) -> int:
@@ -800,13 +800,13 @@ def paper_mapping() -> pd.DataFrame:
     rows = [
         {
             "Paper Component": "MOMDP continuous control",
-            "Toy Version": "직선 통로를 달리는 배송 카트의 순항 속도 제어",
-            "Why it helps": "속도 하나만 조절하지만, 빠른 도착 / 배터리 효율 / 안전성 3개 KPI가 서로 충돌하는 상황을 직관적으로 볼 수 있습니다.",
+            "Toy Version": "1-step 환경에서 하나의 scalar action a를 고르는 제어 문제",
+            "Why it helps": "정책이 액션을 어떻게 만들고, 그 액션이 `빠른 도착`과 `에너지 효율` reward를 어떻게 바꾸는지 가장 단순한 형태로 볼 수 있습니다.",
         },
         {
             "Paper Component": "MOPG worker (Algorithm 2)",
-            "Toy Version": "속도 평균 μ에 대한 weighted policy gradient",
-            "Why it helps": "PPO 세부 구현을 걷어내고 정책 경사의 핵심만 남겨, RL 업데이트 방향을 눈으로 추적할 수 있습니다.",
+            "Toy Version": "평균 액션 μ에 대한 weighted policy gradient",
+            "Why it helps": "PPO 세부 구현을 걷어내고 정책 경사의 핵심만 남겨, weight가 policy를 어떻게 이동시키는지 추적할 수 있습니다.",
         },
         {
             "Paper Component": "Hyperbolic improvement predictor",
