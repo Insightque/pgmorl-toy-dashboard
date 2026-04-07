@@ -14,8 +14,11 @@ from toy_pgmorl.core import (
     ToyConfig,
     closed_form_optimum_mu,
     expected_objectives,
+    hypervolume,
+    pareto_front,
     run_experiment,
     sample_objectives,
+    sparsity,
 )
 
 
@@ -215,6 +218,12 @@ def current_archive_snapshot(archive_pg: pd.DataFrame, visible_generation: int) 
     return snapshot.drop_duplicates(subset=["policy_id"]).sort_values("eval_1").reset_index(drop=True)
 
 
+def previous_archive_snapshot(archive_pg: pd.DataFrame, visible_generation: int) -> pd.DataFrame:
+    if visible_generation <= 0:
+        return pd.DataFrame(columns=archive_pg.columns)
+    return current_archive_snapshot(archive_pg, visible_generation - 1)
+
+
 def current_task_rows(tasks_pg: pd.DataFrame, visible_generation: int) -> pd.DataFrame:
     if visible_generation <= 0:
         return pd.DataFrame()
@@ -242,6 +251,41 @@ def initial_policy_rows(tasks_pg: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def front_df_from_points(points: np.ndarray, label: str) -> pd.DataFrame:
+    if points.size == 0:
+        return pd.DataFrame(columns=["eval_1", "eval_2", "front_label", "order"])
+    front = pareto_front(points)
+    if front.size == 0:
+        return pd.DataFrame(columns=["eval_1", "eval_2", "front_label", "order"])
+    return pd.DataFrame(
+        {
+            "eval_1": front[:, 0],
+            "eval_2": front[:, 1],
+            "front_label": label,
+            "order": np.arange(len(front)),
+        }
+    )
+
+
+def snapshot_front_df(snapshot: pd.DataFrame, label: str) -> pd.DataFrame:
+    if snapshot.empty:
+        return pd.DataFrame(columns=["eval_1", "eval_2", "front_label", "order"])
+    points = snapshot[["eval_1", "eval_2"]].to_numpy(dtype=np.float64)
+    return front_df_from_points(points, label)
+
+
+def predicted_virtual_front_df(prev_archive: pd.DataFrame, task_rows: pd.DataFrame) -> pd.DataFrame:
+    predicted = task_rows.dropna(subset=["pred_eval_1", "pred_eval_2"]).copy()
+    if prev_archive.empty and predicted.empty:
+        return pd.DataFrame(columns=["eval_1", "eval_2", "front_label", "order"])
+    all_points: list[np.ndarray] = []
+    if not prev_archive.empty:
+        all_points.extend(prev_archive[["eval_1", "eval_2"]].to_numpy(dtype=np.float64))
+    if not predicted.empty:
+        all_points.extend(predicted[["pred_eval_1", "pred_eval_2"]].to_numpy(dtype=np.float64))
+    return front_df_from_points(np.asarray(all_points, dtype=np.float64), "Predicted virtual front")
+
+
 def update_focus_policy(candidate_points: pd.DataFrame) -> int | None:
     if candidate_points.empty:
         st.session_state.focus_policy_id = None
@@ -266,10 +310,79 @@ def update_interp_selection(interpolation: pd.DataFrame) -> int | None:
     return st.session_state.curve_interp_id
 
 
+def render_performance_legend(step: int, show_oracle: bool) -> None:
+    rows = []
+    if step == 0:
+        rows.extend(
+            [
+                {"표식": "회색 점", "의미": "Warm-up 전 랜덤 초기 정책"},
+                {"표식": "회색 선", "의미": "각 초기 정책이 Warm-up 후 어디로 이동했는지"},
+                {"표식": "청록 점", "의미": "Warm-up 후 첫 세대 population"},
+                {"표식": "검은 실선", "의미": "현재 기준 Pareto archive front"},
+            ]
+        )
+    else:
+        rows.extend(
+            [
+                {"표식": "검은 실선", "의미": "이전 generation까지의 Pareto archive front"},
+                {"표식": "주황 점선", "의미": "선택된 predicted offspring을 넣었을 때의 virtual Pareto front"},
+                {"표식": "초록 실선", "의미": "실제 offspring 학습 후 업데이트된 현재 Pareto archive front"},
+                {"표식": "파란 원", "의미": "task selection 이전의 현재 population"},
+                {"표식": "연한 회색 화살표", "의미": "가능한 모든 (policy, weight) 후보의 예측 궤적"},
+                {"표식": "주황 굵은 화살표 + 주황 다이아", "의미": "실제로 선택된 predicted offspring과 예측 위치"},
+                {"표식": "초록 굵은 화살표 + 초록 삼각형", "의미": "MOPG 후 실제 offspring 위치"},
+            ]
+        )
+    if show_oracle:
+        rows.append({"표식": "회색 점선", "의미": "oracle reference front (이 toy에서만 알 수 있는 이론적 최적 front)"})
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def front_summary_table(prev_archive: pd.DataFrame, predicted_front: pd.DataFrame, current_archive: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    if not prev_archive.empty:
+        points = prev_archive[["eval_1", "eval_2"]].to_numpy(dtype=np.float64)
+        rows.append(
+            {
+                "Front": "Previous archive front",
+                "Meaning": "진화 전 기준 front",
+                "Points": len(points),
+                "Hypervolume": round(float(hypervolume(points)), 2),
+                "Sparsity": round(float(sparsity(points)), 2),
+            }
+        )
+    if not predicted_front.empty:
+        points = predicted_front[["eval_1", "eval_2"]].to_numpy(dtype=np.float64)
+        rows.append(
+            {
+                "Front": "Predicted virtual front",
+                "Meaning": "선택된 predicted offspring을 넣었을 때",
+                "Points": len(points),
+                "Hypervolume": round(float(hypervolume(points)), 2),
+                "Sparsity": round(float(sparsity(points)), 2),
+            }
+        )
+    if not current_archive.empty:
+        points = current_archive[["eval_1", "eval_2"]].to_numpy(dtype=np.float64)
+        rows.append(
+            {
+                "Front": "Updated archive front",
+                "Meaning": "실제 offspring 학습 후 현재 front",
+                "Points": len(points),
+                "Hypervolume": round(float(hypervolume(points)), 2),
+                "Sparsity": round(float(sparsity(points)), 2),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def make_warmup_chart(
-    true_front: pd.DataFrame,
     initial_points: pd.DataFrame,
     warmup_population: pd.DataFrame,
+    current_front: pd.DataFrame,
+    oracle_front: pd.DataFrame,
+    show_oracle: bool,
 ) -> alt.Chart:
     selector = alt.selection_point(name="policy_focus", fields=["policy_id"], on="click", clear=False)
 
@@ -285,11 +398,15 @@ def make_warmup_chart(
         suffixes=("", "_init"),
     )
 
-    true_front_layer = (
-        alt.Chart(true_front)
-        .mark_line(strokeDash=[8, 5], strokeWidth=2.5, color="#6c757d")
-        .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
-    )
+    layers: list[alt.Chart] = []
+
+    if show_oracle and not oracle_front.empty:
+        oracle_layer = (
+            alt.Chart(oracle_front)
+            .mark_line(strokeDash=[8, 5], strokeWidth=1.8, color="#9aa1a9")
+            .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
+        )
+        layers.append(oracle_layer)
 
     initial_layer = (
         alt.Chart(initial_points)
@@ -319,28 +436,61 @@ def make_warmup_chart(
         .add_params(selector)
     )
 
-    return (
-        alt.layer(true_front_layer, move_layer, initial_layer, warmup_layer)
-        .properties(height=470, title="Step 1. Warm-up: 초기 정책이 고르게 퍼지며 첫 세대를 형성")
-        .interactive()
+    current_front_layer = (
+        alt.Chart(current_front)
+        .mark_line(strokeWidth=3.8, color="#111111")
+        .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
     )
+
+    layers.extend([move_layer, initial_layer, current_front_layer, warmup_layer])
+
+    return alt.layer(*layers).properties(
+        height=470,
+        title="Step 1. Warm-up: 초기 정책이 첫 Pareto archive front를 형성",
+    ).interactive()
 
 
 def make_evolution_chart(
-    true_front: pd.DataFrame,
     parent_population: pd.DataFrame,
-    archive_snapshot: pd.DataFrame,
+    prev_archive_snapshot: pd.DataFrame,
+    current_archive_snapshot_df: pd.DataFrame,
     predictor_rows: pd.DataFrame,
     task_rows: pd.DataFrame,
-    analysis_interpolation: pd.DataFrame,
-    analysis_done: bool,
     visible_generation: int,
+    oracle_front: pd.DataFrame,
+    show_oracle: bool,
 ) -> alt.Chart:
     selector = alt.selection_point(name="policy_focus", fields=["policy_id"], on="click", clear=False)
 
-    true_front_layer = (
-        alt.Chart(true_front)
-        .mark_line(strokeDash=[8, 5], strokeWidth=2.0, color="#6c757d")
+    prev_front = snapshot_front_df(prev_archive_snapshot, "Previous archive front")
+    current_front = snapshot_front_df(current_archive_snapshot_df, "Updated archive front")
+    predicted_front = predicted_virtual_front_df(prev_archive_snapshot, task_rows)
+
+    layers: list[alt.Chart] = []
+
+    if show_oracle and not oracle_front.empty:
+        oracle_layer = (
+            alt.Chart(oracle_front)
+            .mark_line(strokeDash=[8, 5], strokeWidth=1.8, color="#9aa1a9")
+            .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
+        )
+        layers.append(oracle_layer)
+
+    prev_front_layer = (
+        alt.Chart(prev_front)
+        .mark_line(strokeWidth=3.8, color="#111111")
+        .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
+    )
+
+    predicted_front_layer = (
+        alt.Chart(predicted_front)
+        .mark_line(strokeWidth=3.4, strokeDash=[10, 6], color="#f4a261")
+        .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
+    )
+
+    current_front_layer = (
+        alt.Chart(current_front)
+        .mark_line(strokeWidth=4.2, color="#2a9d8f")
         .encode(x=alt.X("eval_1:Q", title="Performance Space: f1"), y=alt.Y("eval_2:Q", title="f2"))
     )
 
@@ -412,9 +562,9 @@ def make_evolution_chart(
         )
     )
 
-    archive_points = (
-        alt.Chart(archive_snapshot)
-        .mark_point(size=95, filled=True, color="#111111")
+    prev_archive_points = (
+        alt.Chart(prev_archive_snapshot)
+        .mark_point(size=85, filled=True, color="#111111")
         .encode(
             x="eval_1:Q",
             y="eval_2:Q",
@@ -422,34 +572,37 @@ def make_evolution_chart(
         )
     )
 
-    layers = [
-        true_front_layer,
-        candidate_lines,
-        selected_prediction_lines,
-        actual_lines,
-        archive_points,
-        predicted_points,
-        offspring_points,
-        parent_points,
-    ]
-
-    if analysis_done and not analysis_interpolation.empty:
-        family_lines = (
-            alt.Chart(analysis_interpolation)
-            .mark_line(strokeWidth=3.0)
-            .encode(
-                x="eval_1:Q",
-                y="eval_2:Q",
-                color=alt.Color("family:N", title="Pareto family"),
-            )
+    current_archive_points = (
+        alt.Chart(current_archive_snapshot_df)
+        .mark_square(size=95, filled=True, color="#2a9d8f")
+        .encode(
+            x="eval_1:Q",
+            y="eval_2:Q",
+            tooltip=["policy_id", "mu", "eval_1", "eval_2"],
         )
-        layers.insert(1, family_lines)
+    )
+
+    layers.extend(
+        [
+            prev_front_layer,
+            predicted_front_layer,
+            current_front_layer,
+            candidate_lines,
+            prev_archive_points,
+            current_archive_points,
+            selected_prediction_lines,
+            actual_lines,
+            predicted_points,
+            offspring_points,
+            parent_points,
+        ]
+    )
 
     return (
         alt.layer(*layers)
         .properties(
             height=470,
-            title=f"Step 3. Generation {visible_generation}: 예측 기반 task selection과 실제 offspring",
+            title=f"Step 3. Generation {visible_generation}: 이전 front → 예측 virtual front → 실제 업데이트된 front",
         )
         .interactive()
     )
@@ -742,10 +895,17 @@ with control_col:
 
 with visual_col:
     st.subheader("시각화 패널")
+    show_oracle = st.checkbox(
+        "이론적 최적 Pareto front 참고선 보기",
+        value=False,
+        help="회색 점선은 이 toy 환경에서만 알 수 있는 oracle reference입니다. 논문 실전 상황에서는 보통 알 수 없는 '정답선'입니다.",
+    )
 
     if not st.session_state.warmup_done:
         initial_points = initial_policy_rows(tasks_pg)
         warmup_population = population_pg[population_pg["snapshot_generation"] == 0].drop_duplicates(subset=["policy_id"])
+        warmup_archive_snapshot = current_archive_snapshot(archive_pg, 0)
+        warmup_front = snapshot_front_df(warmup_archive_snapshot, "Current archive front")
         focus_points = warmup_population.copy()
         focus_id = update_focus_policy(focus_points)
 
@@ -767,7 +927,13 @@ with visual_col:
                 st.write("2. 우측 Performance Space에서 정책 클릭")
                 st.write("3. `작업 선택 및 진화` 반복")
 
-        warmup_chart = make_warmup_chart(result.true_front, initial_points, warmup_population)
+        warmup_chart = make_warmup_chart(
+            initial_points,
+            warmup_population,
+            warmup_front,
+            result.true_front,
+            show_oracle,
+        )
         warmup_event = st.altair_chart(
             warmup_chart,
             use_container_width=True,
@@ -779,7 +945,14 @@ with visual_col:
         if selected_policy is not None:
             st.session_state.focus_policy_id = int(selected_policy)
 
-        st.caption("회색 점은 랜덤 초기 정책, 청록 점은 Warm-up 후 첫 세대 population입니다. 버튼을 누르면 이 상태가 walkthrough의 시작점이 됩니다.")
+        st.markdown("**그래프 읽는 법**")
+        render_performance_legend(step=0, show_oracle=show_oracle)
+        st.caption("이 단계에서의 Pareto front는 `Warm-up이 끝난 직후 archive` 입니다. 지금 보이는 검은 실선이 현재 기준 front입니다.")
+        st.dataframe(
+            front_summary_table(pd.DataFrame(), pd.DataFrame(), warmup_archive_snapshot),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     else:
         visible_generation = st.session_state.visible_generation
@@ -821,6 +994,7 @@ with visual_col:
                 st.metric("Archive Size", str(int(current_metrics["archive_size"])), f"+{int(current_metrics['archive_size'] - previous_metrics['archive_size']) if visible_generation > 0 else int(current_metrics['archive_size'])}")
 
         parent_population = parent_population_snapshot(population_pg, visible_generation)
+        prev_archive = previous_archive_snapshot(archive_pg, visible_generation)
         archive_snapshot = current_archive_snapshot(archive_pg, visible_generation)
         task_rows = current_task_rows(tasks_pg, visible_generation)
         predictor_rows = current_predictor_rows(predictor_pg, visible_generation)
@@ -834,7 +1008,14 @@ with visual_col:
 
         if visible_generation == 0:
             initial_points = initial_policy_rows(tasks_pg)
-            performance_chart = make_warmup_chart(result.true_front, initial_points, parent_population)
+            warmup_front = snapshot_front_df(archive_snapshot, "Current archive front")
+            performance_chart = make_warmup_chart(
+                initial_points,
+                parent_population,
+                warmup_front,
+                result.true_front,
+                show_oracle,
+            )
             performance_event = st.altair_chart(
                 performance_chart,
                 use_container_width=True,
@@ -844,14 +1025,14 @@ with visual_col:
             )
         else:
             performance_chart = make_evolution_chart(
-                result.true_front,
                 parent_population,
+                prev_archive,
                 archive_snapshot,
                 predictor_rows,
                 task_rows,
-                interpolation,
-                st.session_state.analysis_done,
                 visible_generation,
+                result.true_front,
+                show_oracle,
             )
             performance_event = st.altair_chart(
                 performance_chart,
@@ -865,6 +1046,28 @@ with visual_col:
         if selected_policy is not None:
             st.session_state.focus_policy_id = int(selected_policy)
             focus_id = int(selected_policy)
+
+        st.markdown("**그래프 읽는 법**")
+        render_performance_legend(step=visible_generation, show_oracle=show_oracle)
+        if visible_generation > 0:
+            predicted_front = predicted_virtual_front_df(prev_archive, task_rows)
+            st.info(
+                "현재 메인 차트는 세 가지 front를 동시에 보여줍니다. "
+                "`검은 실선`은 진화 전 기준 archive, `주황 점선`은 선택된 predicted offspring을 넣었을 때의 virtual front, "
+                "`초록 실선`은 실제 학습 후 다시 계산된 현재 archive front입니다."
+            )
+            st.dataframe(
+                front_summary_table(prev_archive, predicted_front, archive_snapshot),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("Generation 0에서는 Warm-up 직후 archive만 존재합니다. 검은 실선이 현재 기준 Pareto front입니다.")
+            st.dataframe(
+                front_summary_table(pd.DataFrame(), pd.DataFrame(), archive_snapshot),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         predictor_generation = predictor_generation_for_view(visible_generation)
         predictor_chart = make_predictor_chart(
@@ -883,7 +1086,8 @@ with visual_col:
                     mu_value = float(focus_parent.iloc[0]["mu"])
                     st.caption(
                         f"현재 focus policy #{focus_id}의 평균 action μ는 {mu_value:.2f}입니다. "
-                        f"이 위의 곡선은 각 weight ω에서 예상되는 Δf를 나타냅니다."
+                        f"이 위의 곡선은 각 weight ω에서 예상되는 Δf를 나타냅니다. "
+                        f"Step 3에서는 이 예측값으로 어떤 (policy, weight) 쌍이 Pareto front를 가장 넓힐지 평가합니다."
                     )
             else:
                 st.info("이 정책에 대한 predictor curve가 아직 없습니다. Warm-up 이후 첫 evolution generation에서 생성됩니다.")
